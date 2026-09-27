@@ -16,13 +16,12 @@ class Settings:
     api_token: str = ""
     environment: str = "local"
     embedding_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
-    embedding_revision: str = "e8f8c211226b894fcb81acc59f3b34ba3efd5f42"
     embedding_cache: str = str(ROOT / ".cache" / "embeddings")
     db_path: str = str(ROOT / ".cache" / "chroma")
     min_similarity: float = 0.35
     top_k: int = 8
     timeout: float = 90.0
-    max_concurrent: int = 2
+    max_concurrent: int = 1
 
     @classmethod
     def from_env(cls):
@@ -36,9 +35,13 @@ class Settings:
             llm_api_key=os.getenv("LLM_API_KEY", ""),
             api_token=os.getenv("API_ACCESS_TOKEN", ""),
             environment=os.getenv("APP_ENV", "local"),
+            embedding_model=os.getenv(
+                "EMBEDDING_MODEL", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+            ),
             embedding_cache=os.getenv("EMBEDDING_CACHE", str(ROOT / ".cache" / "embeddings")),
             db_path=os.getenv("CHROMA_PATH", str(ROOT / ".cache" / "chroma")),
             min_similarity=float(os.getenv("MIN_SIMILARITY", "0.35")),
+            max_concurrent=int(os.getenv("MAX_CONCURRENT", "1")),
         )
         value.validate()
         return value
@@ -50,6 +53,8 @@ class Settings:
             raise ValueError("LLM_PROVIDER harus ollama, hosted, atau extractive.")
         if not 0 <= self.min_similarity <= 1:
             raise ValueError("MIN_SIMILARITY harus antara 0 dan 1.")
+        if self.max_concurrent < 1:
+            raise ValueError("MAX_CONCURRENT minimal 1.")
         if self.environment == "production":
             if len(self.api_token) < 32:
                 raise ValueError("Production memerlukan API_ACCESS_TOKEN minimal 32 karakter.")

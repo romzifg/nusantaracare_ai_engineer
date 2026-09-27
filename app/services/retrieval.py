@@ -1,13 +1,11 @@
 import hashlib
 import json
+import math
 import re
 
 import chromadb
 from chromadb.config import Settings as ChromaSettings
-from sentence_transformers import SentenceTransformer
-from transformers.utils import logging as hf_logging
-from huggingface_hub import snapshot_download
-import torch
+from fastembed import TextEmbedding
 
 from app.config import ROOT
 from app.services.knowledge import SOURCE_NAME, SOURCE_SHA256, PIPELINE_VERSION, parse_document, make_chunks
@@ -22,30 +20,20 @@ def terms(text):
 class Retriever:
     def __init__(self, settings):
         self.settings = settings
-        torch.set_num_threads(2)
-        hf_logging.disable_progress_bar()
         self.header, self.passages = parse_document(ROOT / "data/raw_docs" / SOURCE_NAME)
         self.by_id = {p.id: p for p in self.passages}
-        try:
-            model_path = snapshot_download(settings.embedding_model, cache_dir=settings.embedding_cache,
-                                           revision=settings.embedding_revision, local_files_only=True)
-        except OSError:
-            model_path = snapshot_download(settings.embedding_model, cache_dir=settings.embedding_cache,
-                                           revision=settings.embedding_revision,
-                                           allow_patterns=["*.json", "*.safetensors", "*.txt", "1_Pooling/*"])
-        # Gunakan folder model di cache supaya tokenizer tidak mencari model lagi ke internet.
-        self.model = SentenceTransformer(model_path, local_files_only=True, device="cpu")
-        self.chunks = make_chunks(self.passages, self.header, self.model.tokenizer)
+        self.model = TextEmbedding(
+            model_name=settings.embedding_model,
+            cache_dir=settings.embedding_cache,
+            threads=1,
+            providers=["CPUExecutionProvider"],
+            enable_cpu_mem_arena=False,
+        )
+        self.chunks = make_chunks(self.passages, self.header, self.model.token_count)
         for chunk in self.chunks:
-            title_ids = self.model.tokenizer(chunk["metadata"]["section_title"],
-                                             add_special_tokens=False)["input_ids"][:28]
-            title = self.model.tokenizer.decode(title_ids)
-            chunk["embedding_text"] = title + "\n" + chunk["text"]
-            size = len(self.model.tokenizer(chunk["embedding_text"], truncation=False)["input_ids"])
-            if size > self.model.max_seq_length:
-                raise ValueError("Chunk embedding melebihi kapasitas model; kurangi ukuran chunk.")
+            chunk["embedding_text"] = chunk["metadata"]["section_title"] + "\n" + chunk["text"]
         signature = hashlib.sha256(json.dumps(
-            [SOURCE_SHA256, PIPELINE_VERSION, settings.embedding_model, settings.embedding_revision, 96, 18]
+            [SOURCE_SHA256, PIPELINE_VERSION, settings.embedding_model, 112, 18]
         ).encode()).hexdigest()[:16]
         self.client = chromadb.PersistentClient(
             path=settings.db_path, settings=ChromaSettings(anonymized_telemetry=False)
@@ -60,18 +48,30 @@ class Retriever:
             # Jangan gunakan indeks parsial; buat CHROMA_PATH baru untuk membangun ulang.
             if self.collection.count():
                 raise ValueError("Indeks parsial/berbeda. Pilih CHROMA_PATH baru untuk rebuild.")
-            vectors = self.model.encode([c["embedding_text"] for c in self.chunks],
-                                        normalize_embeddings=True, show_progress_bar=False)
+            vectors = self._normalize(self.model.embed(
+                [c["embedding_text"] for c in self.chunks], batch_size=1, parallel=None
+            ))
             self.collection.upsert(
                 ids=[c["id"] for c in self.chunks], documents=[c["text"] for c in self.chunks],
-                metadatas=[c["metadata"] for c in self.chunks], embeddings=vectors.tolist()
+                metadatas=[c["metadata"] for c in self.chunks], embeddings=vectors
             )
+
+    @staticmethod
+    def _normalize(vectors):
+        normalized = []
+        for vector in vectors:
+            values = [float(value) for value in vector]
+            norm = math.sqrt(sum(value * value for value in values))
+            normalized.append([value / max(norm, 1e-12) for value in values])
+        return normalized
 
     def search(self, question, sop_only=False):
         # Kecocokan kata membantu mengurutkan hasil; similarity tetap harus melewati ambang.
         aliases = {"wa": "WhatsApp", "nyangkut": "gangguan", "login": "akses akun",
                    "lelet": "gangguan layanan", "laptop": "laptop perlengkapan"}
         expanded = " ".join(aliases.get(word.lower(), word) for word in question.split())
+        if "kata sandi" in question.lower() or "password" in question.lower():
+            expanded += " password kredensial autentikasi"
         queries = [expanded]
         if "akses" in question.lower() or "akun" in question.lower():
             queries.append(expanded + " persetujuan Atasan Langsung Pemilik Layanan")
@@ -80,8 +80,8 @@ class Retriever:
             {"doc_version": {"$eq": "2.0"}},
             {"authority": {"$in": ["primary"] if sop_only else ["primary", "faq"]}},
         ]}
-        query_vectors = self.model.encode(queries, normalize_embeddings=True, show_progress_bar=False)
-        result = self.collection.query(query_embeddings=query_vectors.tolist(), n_results=self.settings.top_k,
+        query_vectors = self._normalize(self.model.query_embed(queries, batch_size=1, parallel=None))
+        result = self.collection.query(query_embeddings=query_vectors, n_results=self.settings.top_k,
                                        where=filters, include=["metadatas", "distances"])
         scored = {}
         qterms = terms(expanded)

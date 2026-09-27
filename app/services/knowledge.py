@@ -8,7 +8,7 @@ import yaml
 
 SOURCE_NAME = "nusantaracare_panduan_operasional_internal_v2.md"
 SOURCE_SHA256 = "4c8aa6e896425547ec55392a7a8df97142d20e3d93b480aa29494f0e6f514db8"
-PIPELINE_VERSION = "nc-ops-v2-title-aware-faq-answer"
+PIPELINE_VERSION = "nc-ops-v2-title-aware-faq-answer-fastembed-onnx-v1"
 
 
 @dataclass
@@ -90,21 +90,46 @@ def parse_document(path: Path, verify=True):
     return header, passages
 
 
-def make_chunks(passages, header, tokenizer, max_tokens=96, overlap=18):
-    """Potong teks berdasarkan token sambil menjaga kutipan tetap sama dengan sumber."""
-    if overlap >= max_tokens or overlap < 0:
-        raise ValueError("Overlap harus lebih kecil dari ukuran chunk.")
+def make_chunks(passages, header, token_count, max_tokens=112, overlap=18):
+    """Potong teks dengan tokenizer FastEmbed; judul ikut dihitung dalam batas token."""
+    if max_tokens <= 0 or overlap >= max_tokens or overlap < 0:
+        raise ValueError("Ukuran chunk harus positif; overlap harus antara nol dan ukuran chunk.")
     chunks = []
     for p in passages:
-        offsets = tokenizer(p.text, add_special_tokens=False, truncation=False,
-                            max_length=100000, return_offsets_mapping=True)["offset_mapping"]
-        for start in range(0, len(offsets), max_tokens-overlap):
-            stop = min(start+max_tokens, len(offsets))
-            text = p.text[offsets[start][0]:offsets[stop-1][1]]
+        words = list(re.finditer(r"\S+", p.text))
+        if not words:
+            continue
+
+        start, chunk_number = 0, 0
+        while start < len(words):
+            low, high, stop = start + 1, len(words), start
+            while low <= high:
+                middle = (low + high) // 2
+                candidate = p.text[words[start].start():words[middle - 1].end()]
+                if token_count(f"{p.section}\n{candidate}") <= max_tokens:
+                    stop = middle
+                    low = middle + 1
+                else:
+                    high = middle - 1
+
+            # Satu kata sangat panjang tetap dipakai agar proses selalu maju.
+            if stop == start:
+                single_word = p.text[words[start].start():words[start].end()]
+                if token_count(f"{p.section}\n{single_word}") > max_tokens:
+                    raise ValueError("Judul atau satu token sumber melebihi batas ukuran chunk.")
+                stop = start + 1
+            text = p.text[words[start].start():words[stop - 1].end()]
             chunks.append({
-                "id": f"{p.id}-c{start:04d}", "text": text,
+                "id": f"{p.id}-c{chunk_number:04d}", "text": text,
                 "metadata": p.metadata(header),
             })
-            if stop == len(offsets):
+            if stop == len(words):
                 break
+            next_start = stop
+            while next_start > start + 1:
+                overlap_text = p.text[words[next_start - 1].start():words[stop - 1].end()]
+                if token_count(overlap_text) > overlap:
+                    break
+                next_start -= 1
+            start, chunk_number = next_start, chunk_number + 1
     return chunks
