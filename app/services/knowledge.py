@@ -8,7 +8,7 @@ import yaml
 
 SOURCE_NAME = "nusantaracare_panduan_operasional_internal_v2.md"
 SOURCE_SHA256 = "4c8aa6e896425547ec55392a7a8df97142d20e3d93b480aa29494f0e6f514db8"
-PIPELINE_VERSION = "nc-ops-v2-title-aware-faq-answer-fastembed-onnx-v1"
+PIPELINE_VERSION = "nc-ops-v2-tfidf-words-v2"
 
 
 @dataclass
@@ -91,7 +91,7 @@ def parse_document(path: Path, verify=True):
 
 
 def make_chunks(passages, header, token_count, max_tokens=112, overlap=18):
-    """Potong teks dengan tokenizer FastEmbed; judul ikut dihitung dalam batas token."""
+    """Potong teks memakai penghitung yang diberikan; judul ikut dalam anggaran."""
     if max_tokens <= 0 or overlap >= max_tokens or overlap < 0:
         raise ValueError("Ukuran chunk harus positif; overlap harus antara nol dan ukuran chunk.")
     chunks = []

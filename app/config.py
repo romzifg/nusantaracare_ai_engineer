@@ -15,10 +15,8 @@ class Settings:
     llm_api_key: str = ""
     api_token: str = ""
     environment: str = "local"
-    embedding_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
-    embedding_cache: str = str(ROOT / ".cache" / "embeddings")
     db_path: str = str(ROOT / ".cache" / "chroma")
-    min_similarity: float = 0.35
+    min_similarity: float = 0.12
     top_k: int = 8
     timeout: float = 90.0
     max_concurrent: int = 1
@@ -35,12 +33,9 @@ class Settings:
             llm_api_key=os.getenv("LLM_API_KEY", ""),
             api_token=os.getenv("API_ACCESS_TOKEN", ""),
             environment=os.getenv("APP_ENV", "local"),
-            embedding_model=os.getenv(
-                "EMBEDDING_MODEL", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
-            ),
-            embedding_cache=os.getenv("EMBEDDING_CACHE", str(ROOT / ".cache" / "embeddings")),
             db_path=os.getenv("CHROMA_PATH", str(ROOT / ".cache" / "chroma")),
-            min_similarity=float(os.getenv("MIN_SIMILARITY", "0.35")),
+            # Skala TF-IDF berbeda dari ONNX. Jangan pakai threshold lama dari .env.
+            min_similarity=float(os.getenv("RETRIEVAL_MIN_SCORE", "0.12")),
             max_concurrent=int(os.getenv("MAX_CONCURRENT", "1")),
         )
         value.validate()
@@ -52,7 +47,7 @@ class Settings:
         if self.provider not in {"ollama", "hosted", "extractive"}:
             raise ValueError("LLM_PROVIDER harus ollama, hosted, atau extractive.")
         if not 0 <= self.min_similarity <= 1:
-            raise ValueError("MIN_SIMILARITY harus antara 0 dan 1.")
+            raise ValueError("RETRIEVAL_MIN_SCORE harus antara 0 dan 1.")
         if self.max_concurrent < 1:
             raise ValueError("MAX_CONCURRENT minimal 1.")
         if self.environment == "production":

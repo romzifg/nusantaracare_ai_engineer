@@ -60,8 +60,8 @@ RAG adalah cara menggunakan AI dengan mencari rujukan terlebih dahulu. Dalam pro
 
 Dokumen dibaca berdasarkan judul bagian dan paragraf, kemudian paragraf panjang dipecah menjadi potongan kecil (*chunk*). Tujuannya agar pencarian lebih terarah.
 
-- Ukuran maksimal potongan adalah 112 token, termasuk judul bagiannya. Token adalah satuan teks yang dibaca model; satu token tidak selalu sama dengan satu kata.
-- Potongan berurutan dapat mengulang hingga 18 token (*overlap*) agar konteks di batas potongan tidak langsung hilang.
+- Ukuran maksimal potongan adalah 112 kata, termasuk judul bagiannya. Versi ringan menghitung kata berdasarkan spasi, bukan memakai tokenizer model neural.
+- Potongan berurutan dapat mengulang hingga 18 kata (*overlap*) agar konteks di batas potongan tidak langsung hilang.
 - Potongan tidak mencampur paragraf atau versi kebijakan yang berbeda. Teks asli tetap disimpan untuk kutipan.
 - Setiap potongan memiliki ID dan keterangan sumber, seperti `doc_id`, `doc_title`, `section_title`, `doc_version`, `effective_date`, `is_active`, jenis sumber (`authority`), ID paragraf (`passage_id`), dan nomor baris.
 
@@ -69,17 +69,17 @@ Saat jawaban dikirim, `chunk_id` pada kutipan menunjuk ID paragraf sumber yang d
 
 ### Menyimpan informasi agar bisa dicari
 
-Teks diubah menjadi deretan angka yang mewakili maknanya. Proses ini disebut *embedding*, sehingga pencarian tidak hanya mengandalkan kata yang sama persis.
+Teks diubah menjadi vektor TF-IDF: deretan angka yang memberi bobot pada kata. Kata yang khas pada suatu bagian mendapat bobot lebih besar daripada kata yang muncul di banyak bagian. Contohnya, kata “WhatsApp” membantu menemukan aturan saluran layanan.
 
-Model yang digunakan adalah multilingual MiniLM-L12-v2 melalui FastEmbed dan ONNX Runtime CPU. Model menghasilkan 384 angka untuk setiap teks. Pemrosesan embedding dilakukan di server aplikasi, tanpa mengirim dokumen ke API embedding luar.
+Versi ini tidak memuat model embedding neural: tidak ada unduhan Hugging Face maupun pemuatan Torch, FastEmbed, atau ONNX Runtime oleh pipeline pencarian. Kosakata dibentuk dari dokumen lokal (maksimal 4096 istilah; dokumen saat ini menghasilkan 1001 dimensi). Alias seperti “wa” → “whatsapp” dan “pulih” → “pemulihan” membantu variasi kata, tetapi ini bukan pemahaman makna seperti model neural.
 
-Hasilnya disimpan dalam ChromaDB, yaitu penyimpanan untuk pencarian berdasarkan kemiripan makna. ChromaDB dipilih karena bisa berjalan tanpa server database terpisah dan mendukung penyaringan versi serta status aktif dokumen.
+Vektor disimpan dalam ChromaDB dan dicari berdasarkan cosine similarity. Vector database tetap digunakan, dengan filter versi serta status aktif dokumen. Chroma diberi vektor secara eksplisit dan `embedding_function=None` agar tidak mengunduh model bawaannya. Paket ONNX mungkin masih menjadi dependensi tidak langsung Chroma, tetapi tidak dimuat untuk pencarian ini.
 
 ### Mencari sumber yang relevan
 
-Pencarian mengambil hingga delapan kandidat per pencarian (*top-k*), lalu mengurutkannya berdasarkan kemiripan makna dan kecocokan kata. Hingga enam paragraf teratas digunakan sebagai hasil awal; paragraf prosedur yang berkaitan dapat ditambahkan agar syarat penting tidak terlewat.
+Pencarian mengambil hingga delapan kandidat per pencarian (*top-k*), lalu mengurutkannya berdasarkan kemiripan vektor TF-IDF dan kecocokan kata. Hingga enam paragraf teratas digunakan sebagai hasil awal; paragraf prosedur yang berkaitan dapat ditambahkan agar syarat penting tidak terlewat.
 
-Ambang kemiripan (*threshold*) saat ini adalah `0.35`. Hasil di bawah nilai tersebut tidak digunakan. Angka ini bukan berarti jawaban “35% benar”; ini hanya batas penyaringan dan perlu dievaluasi ketika model atau dokumen berubah.
+Ambang kemiripan awal (*threshold*) adalah `RETRIEVAL_MIN_SCORE=0.12`. Hasil di bawah nilai tersebut tidak digunakan. Skala TF-IDF berbeda dari model lama, sehingga `MIN_SIMILARITY=0.35` dari versi ONNX tidak dipakai lagi. Angka ini bukan persentase kebenaran dan masih perlu evaluasi pada pertanyaan baru.
 
 Pencarian dibatasi ke `doc_version=2.0`, `is_active=true`, dan sumber SOP/FAQ. Bagian arsip, contoh, dan matriks ringkasan tidak dijadikan dasar jawaban.
 
@@ -97,7 +97,7 @@ Ada dua alur utama:
 
 ```text
 Saat aplikasi mulai:
-Dokumen → dibaca dan dipotong → dibuat embedding → disimpan di ChromaDB
+Dokumen → dibaca dan dipotong → dibuat vektor TF-IDF → disimpan di ChromaDB
 
 Saat pengguna bertanya:
 Pertanyaan → pemeriksaan input → pencarian aturan aktif
@@ -112,7 +112,9 @@ Istilah *agent* pada proyek ini berarti pengatur langkah pencarian dan pemeriksa
 | `app/config.py` | Membaca pengaturan, seperti model, alamat layanan, dan batas permintaan |
 | `app/schemas.py` | Menentukan bentuk data pertanyaan dan jawaban |
 | `app/services/knowledge.py` | Membaca dokumen, menandai arsip, dan membuat potongan teks |
-| `app/services/retrieval.py` | Membuat embedding dan mencari sumber yang relevan di ChromaDB |
+| `app/services/retrieval.py` | Menyimpan vektor dan mencari sumber yang relevan di ChromaDB |
+| `app/services/lexical.py` | Mengubah teks menjadi vektor TF-IDF lokal dan menyamakan beberapa variasi kata |
+| `app/services/runtime_stats.py` | Mencatat waktu dan RAM proses pada tahap startup, tanpa mencatat pertanyaan atau secret |
 | `app/services/llm.py` | Berkomunikasi dengan Ollama atau layanan hosted |
 | `app/services/agent.py` | Mengatur pemilihan sumber, penolakan, dan penyusunan jawaban |
 | `app/services/rag.py` | Menghubungkan komponen pencarian dan model saat aplikasi dimulai |
@@ -120,7 +122,7 @@ Istilah *agent* pada proyek ini berarti pengatur langkah pencarian dan pemeriksa
 | `reports/` | Menyimpan hasil evaluasi, bukan sumber jawaban pengguna |
 | `docs/` | Menyimpan penjelasan tambahan dan laporan pengujian |
 | `tests/` | Menyimpan kode pengujian otomatis |
-| `.cache/` | Menyimpan model embedding dan indeks pencarian yang dibuat aplikasi |
+| `.cache/` | Menyimpan indeks pencarian; cache model dari versi lama tidak dipakai dan tidak perlu diunggah |
 
 ## 5. Kontrak API — Cara Mengirim Pertanyaan dan Membaca Jawaban
 
@@ -159,7 +161,7 @@ HTTP `200` berarti permintaan selesai diproses, tetapi jawabannya bisa berupa pe
 
 ## 6. Cara Menjalankan Lokal
 
-Langkah berikut menggunakan PowerShell dari folder `final_project`. Lingkungan lokal yang sudah diuji menggunakan Python 3.10.
+Langkah berikut menggunakan PowerShell dari folder `final_project`. Gunakan Python 3.11 sesuai `pyproject.toml`; verifikasi versi ringan dilakukan dengan Python 3.11.15.
 
 ### Siapkan lingkungan Python
 
@@ -180,7 +182,7 @@ if (-not (Test-Path .env)) {
 
 ### Pilih layanan model
 
-Pilih salah satu pengaturan berikut di `.env`; pengaturan embedding lainnya bisa mengikuti `.env.example`.
+Pilih salah satu pengaturan berikut di `.env`; pengaturan pencarian lainnya bisa mengikuti `.env.example`.
 
 **Pilihan A: Ollama di komputer sendiri.** Pasang dan jalankan Ollama, lalu unduh model dengan `ollama pull llama3`. Pilihan ini tidak membutuhkan API key penyedia model, tetapi membutuhkan memori komputer untuk menjalankan model.
 
@@ -210,12 +212,13 @@ Jangan membagikan isi `.env` atau memasukkannya ke repository publik.
 fastapi dev
 ```
 
-jika tidak bisa menggunakan fastapi dev gunakan
+Jika `fastapi dev` mengarah ke venv aplikasi lain, gunakan executable proyek secara langsung:
+
 ```powershell
 .\.venv\Scripts\fastapi.exe dev
 ```
 
-Perintah `fastapi dev` membaca lokasi aplikasi dari `pyproject.toml` dan memuat ulang server saat kode berubah. Pada pemakaian pertama, aplikasi mengunduh model embedding dan membuat indeks, sehingga proses awal dapat lebih lama. `MAX_CONCURRENT=1` membatasi satu pertanyaan aktif per proses agar beban lebih terkendali.
+Perintah `fastapi dev` membaca lokasi aplikasi dari `pyproject.toml` dan memuat ulang server saat kode berubah. Pada pemakaian pertama, aplikasi membuat indeks TF-IDF tanpa unduhan model. `MAX_CONCURRENT=1` membatasi satu pertanyaan aktif per proses agar beban lebih terkendali.
 
 Buka [dokumentasi API lokal](http://127.0.0.1:8000/docs), pilih `POST /ask`, klik **Try it out**, isi pertanyaan, lalu klik **Execute**. Jika token akses diaktifkan, isi token lewat tombol **Authorize** terlebih dahulu.
 
@@ -223,20 +226,30 @@ Untuk menghentikan server, tekan `Ctrl+C`. Untuk keluar dari lingkungan Python, 
 
 ## 7. Deployment — Menjalankan Aplikasi di Cloud
 
-Percobaan FastAPI Cloud sebelumnya gagal karena kehabisan memori (*out of memory* atau OOM). Embedding kemudian dipindahkan dari PyTorch ke ONNX Runtime CPU dengan pemrosesan dalam kelompok kecil. Tujuannya mengurangi beban memori, tetapi keberhasilan deploy setelah perubahan ini **belum diverifikasi**.
+Percobaan FastAPI Cloud dengan model embedding neural, termasuk ONNX, gagal karena kehabisan memori (*out of memory* atau OOM). Versi sekarang memakai TF-IDF lokal + ChromaDB untuk menghilangkan kebutuhan memuat model tersebut. Uji lokal sekitar 109 MiB RAM, tetapi keberhasilan deploy versi TF-IDF **belum diverifikasi**; penggunaan RAM Linux/cloud bisa berbeda dari Windows.
 
 Hal yang perlu disiapkan sebelum mencoba deploy kembali:
 
 1. Pastikan folder aplikasi yang dipilih memuat `pyproject.toml`, dependensi, folder `app`, dan dokumen pada `data/raw_docs`. Jangan ikut mengunggah `.env`, `.venv`, atau cache lokal.
 2. Masukkan pengaturan melalui environment/secrets cloud. Gunakan `APP_ENV=production` dan `API_ACCESS_TOKEN` acak minimal 32 karakter.
 3. Pilih layanan model. Untuk hosted, isi `LLM_PROVIDER=hosted`, `LLM_MODEL`, `HOSTED_BASE_URL` HTTPS, dan `LLM_API_KEY`. Untuk Ollama, sediakan server Ollama yang dapat dijangkau dengan aman dari cloud. `localhost` di cloud bukan komputer pribadi Anda.
-4. Sediakan akses unduhan model embedding pada pemuatan pertama. Bila penyimpanan cache tidak dipertahankan oleh lingkungan deploy, unduhan dan pembuatan indeks dapat berulang.
+4. Gunakan `RETRIEVAL_MIN_SCORE=0.12` dan `MAX_CONCURRENT=1`. Hapus pengaturan lama `EMBEDDING_MODEL`, `EMBEDDING_CACHE`, dan `MIN_SIMILARITY` dari konfigurasi cloud agar tidak membingungkan; kode baru mengabaikannya. Tidak diperlukan `HF_TOKEN` untuk pencarian TF-IDF. Jalankan satu worker server, tanpa `--reload` di cloud; batas concurrency berlaku per proses.
 5. Setelah aplikasi aktif, periksa `/health`, `/ready`, dan `/ask`. Uji jawaban yang ada di dokumen, pertanyaan yang tidak ada, penolakan token salah, serta aturan aktif v2.0.
 
 Pantau penggunaan memori saat aplikasi mulai dan ketika menerima pertanyaan. Status `/ready` saja belum membuktikan bahwa koneksi ke penyedia model sudah berhasil.
 
+Log baru menampilkan `startup stage=begin`, `retrieval_imported`, `tfidf_ready`, `chroma_opened`, `index_ready`, dan `ready`, beserta RAM proses. Pastikan build memakai commit terbaru dan log mencapai `Application startup complete`. TF-IDF menggunakan koleksi Chroma baru; indeks ONNX lama tidak dihapus atau dicampur. Indeks yang terputus di tengah pembuatan dapat dilanjutkan.
+
+Uji lokal tanpa memanggil layanan LLM:
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+.\.venv\Scripts\python.exe -m scripts.verify_lightweight --output reports/hasil-tfidf-baru.json
+```
+
 ## 8. Keterbatasan
 
+- TF-IDF bergantung pada kecocokan kata. Pertanyaan dengan sinonim yang belum dikenali dapat terlewat. Vector database tetap digunakan, tetapi ini bukan neural semantic embedding; jika rubrik mewajibkan model embedding neural tertentu, desain ini perlu dikonfirmasi kepada pengajar.
 - Jawaban terbatas pada isi dokumen. Asisten tidak mengetahui nomor, status, atau informasi lain yang tidak dicantumkan dalam panduan.
 - Kutipan diperiksa terhadap sumber, tetapi model masih bisa memilih paragraf yang kurang tepat. Jawaban juga dapat terasa panjang karena mempertahankan teks sumber.
 - Pemeriksaan instruksi berbahaya masih berbasis pola, sehingga belum menjamin semua upaya manipulasi pertanyaan dapat dikenali.
@@ -258,15 +271,19 @@ Hasil versi lama dan versi sekarang dipisahkan karena mesin embedding telah beru
 | Versi ONNX, 27 September 2026 | 149 potongan dokumen berhasil diindeks | Dokumen berhasil disiapkan untuk pencarian lokal |
 | Pencarian versi ONNX | 23 dari 23 pertanyaan menemukan bagian yang diharapkan dalam enam hasil teratas | Menguji pencarian sumber, bukan ketepatan jawaban akhir AI |
 | API lokal versi ONNX | `/health`, `/ready`, dan dua pertanyaan `/ask` mendapat HTTP 200 | Diuji memakai mode `extractive`, yaitu pengambilan kutipan tanpa model bahasa |
-| Deployment cloud setelah migrasi | Belum diuji ulang | Belum bisa dinyatakan berhasil deploy atau bebas OOM |
+| Deployment cloud ONNX | Verification Failed (OOM) | ONNX saja belum cukup mengatasi batas memori instance |
+| TF-IDF lokal + ChromaDB | 108 potongan, 1001 dimensi; 23/23 kasus pencarian lama lolos setelah normalisasi kata | Pencarian sumber saja, bukan akurasi jawaban LLM atau pengujian independen |
+| RAM dan startup TF-IDF lokal | Sekitar 109 MiB RAM proses; sekitar 5 detik termasuk import pada uji Windows | Bukan pengukuran di Linux/cloud, bukan uji beban banyak pengguna |
+| Unit/API tests TF-IDF | 17/17 lolos | Termasuk filter sumber aktif, autentikasi dan pemulihan indeks parsial; pemilihan LLM sebagian memakai tiruan |
+| Deployment cloud TF-IDF | Belum dijalankan | Perlu commit, push, deploy ulang, dan uji endpoint publik |
 
 Ada catatan penting: dari 13 pertanyaan yang seharusnya ditolak, tujuh masih mendapatkan kandidat hasil pencarian. Ini belum berarti sistem memberikan jawaban salah, tetapi keputusan menolak harus diperiksa lagi bersama model bahasa.
 
-Jadi, angka 23/23 tidak berarti akurasi jawaban 100%. Penggunaan memori puncak dan waktu respons versi ONNX juga belum diukur. Rincian pengujian tersedia dalam [laporan pengujian lokal](docs/LAPORAN_PENGUJIAN.md).
+Jadi, angka 23/23 tidak berarti akurasi jawaban 100%. Uji pertama TF-IDF mendapat 22/23; perbaikan dilakukan pada kumpulan yang sama. Hasil percobaan tetap disimpan dan hasil kode akhir ada di [laporan verifikasi TF-IDF](reports/lightweight-tfidf-release.json). Evaluasi LLM nyata belum diulang untuk TF-IDF. Rincian tersedia dalam [laporan pengujian lokal](docs/LAPORAN_PENGUJIAN.md).
 
 ### Perbaikan berikutnya
 
-1. **Uji alur lengkap versi ONNX bersama model bahasa.** Periksa jawaban, kutipan, dan penolakan, terutama untuk informasi yang tidak ada di dokumen.
+1. **Uji alur lengkap versi TF-IDF bersama model bahasa.** Periksa jawaban, kutipan, dan penolakan, terutama untuk informasi yang tidak ada di dokumen.
 2. **Tambahkan pertanyaan baru.** Sertakan bahasa sehari-hari, salah ketik, pertanyaan gabungan, dan pertanyaan yang mirip tetapi membutuhkan aturan berbeda. Minta pemilik SOP menilai ketepatan jawaban.
 3. **Ukur memori dan waktu respons di cloud.** Periksa saat pemuatan awal maupun saat melayani pertanyaan sebelum menentukan kapasitas server.
 4. **Perbaiki pencarian dan keterbacaan jawaban berdasarkan hasil uji.** Sesuaikan ambang pencarian bila diperlukan, kurangi pengulangan, dan tetap sertakan bukti yang mendukung jawaban.

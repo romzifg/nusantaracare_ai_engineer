@@ -1,6 +1,7 @@
 import asyncio
 import hmac
 import logging
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, Security
@@ -29,9 +30,14 @@ def create_app(agent=None, settings=None):
 
     @asynccontextmanager
     async def lifespan(application):
+        from app.services.runtime_stats import log_stage
+        started = time.perf_counter()
+        log_stage("begin", started)
         if application.state.agent is None:
             from app.services.rag import build_agent
+            log_stage("retrieval_imported", started)
             application.state.agent = await run_in_threadpool(build_agent, settings)
+        log_stage("ready", started)
         yield
 
     application = FastAPI(title="NusantaraCare RAG + Bounded Agent", version="1.0.0", lifespan=lifespan)
