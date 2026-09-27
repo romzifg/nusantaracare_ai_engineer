@@ -1,4 +1,3 @@
-"""Uji jawaban model dengan pertanyaan contoh, bukan data pengguna."""
 import argparse
 import json
 import time
